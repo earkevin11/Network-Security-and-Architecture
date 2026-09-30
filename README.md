@@ -2,11 +2,12 @@
 
 > **Source:** Q&A with the Network Security team
 > **Purpose:** Reference for how internet traffic reaches cloud workloads, where Palo Alto (PA) inspection applies, and where it does **not**.
-> **Classification:** Internal. Keep this in a private repository.
 
 ---
 
 ## TL;DR
+
+Note: This is based on a specific Networking Architecture. Not all environments are the same. In this example, it is running a Hub and Spoke model where Palo Alto is in the Hub network.
 
 | # | Topic | Answer |
 |---|-------|--------|
