@@ -2,6 +2,7 @@
 
 > **Source:** Q&A with the Network Security team
 > **Purpose:** Reference for how internet traffic reaches cloud workloads, where Palo Alto (PA) inspection applies, and where it does **not**.
+> **Classification:** Internal. Keep this in a private repository.
 
 ---
 
@@ -13,6 +14,8 @@
 | 2 | Traffic path | `Internet → PA (cloud) → VNet/VPC → NSG/Security Group → Workload` ✅ Confirmed |
 | 3 | Public IPs on EC2 / VMs / Load Balancers | **Always** pass through PA. Don't focus on public vs. private IP; the design guarantees inspection either way. |
 | 4 | PaaS public endpoints (Azure Storage, App Service, S3) | **The exception.** Reached via Microsoft/AWS-owned public endpoints that **bypass PA**. Not part of the network security architecture. |
+| 5 | Spoke ↔ spoke (east-west) | Every spoke VNet is peered to the hub. Spoke A → Spoke B **must go through the hub PA**, then NSG rules (if any). ✅ Confirmed |
+| 6 | Unpeered VNets | Not peered to the hub or any VNet = **isolated** from all other VNets. |
 
 ---
 
@@ -27,6 +30,9 @@
 | 5 | **For PaaS, security shifts to service + identity controls.** | Private Endpoints, disabled public access, RBAC/IAM, and Azure Policy / SCP guardrails replace the firewall. |
 | 6 | **CSPM is the safety net for the PaaS gap.** | Alerts on publicly accessible storage/S3/App Service are high priority, especially in PHI/PII subscriptions. |
 | 7 | **Azure VM public IP coverage still unconfirmed.** | The network team only explicitly confirmed EC2/LB. Verify before relying on it. |
+| 8 | **Spoke-to-spoke traffic is inspected by PA.** | Lateral movement between subscriptions has to cross the firewall. |
+| 9 | **Subnet-to-subnet in the same VNet is NOT inspected by PA.** | NSGs are the **only** control. No NSG (or default rules only) = wide open inside the VNet. |
+| 10 | **Unpeered VNets are isolated.** | No path to other VNets, but they're also outside the hub's PA protection. |
 
 ---
 
@@ -56,6 +62,13 @@
 >
 > But don't confuse that with EC2 public IPs or load balancer public IPs. Access to those **ALWAYS** goes through the Palo Altos.
 
+### Q5. How is east-west traffic (VNet to VNet) handled?
+
+> **Answer:**
+> - Generally, each subscription has a VNet, and they are all peered to the hub.
+> - For east-west traffic, if a resource in Spoke A wants to talk to a resource in Spoke B, that traffic has to go through our hub (Palo Alto), then it has to abide by NSG rules, if any.
+> - Any virtual networks that are not peered to any VNet or the hub are essentially isolated.
+
 ---
 
 ## 1. Firewall Placement
@@ -72,7 +85,7 @@
 
 ## 2. Network Diagrams
 
-Traffic is split into two diagrams so the paths don't get confused.
+Internet (north-south) traffic is split into two diagrams so the paths don't get confused. East-west diagrams are in Section 3.
 
 ### Diagram A: Traffic that IS inspected by Palo Alto ✅
 
@@ -145,11 +158,112 @@ flowchart LR
 | Diagram | Line style | Meaning |
 |---------|-----------|---------|
 | A | Solid green | Passes through Palo Alto first, then NSG / Security Group |
-| B | Dashed red | Bypasses Palo Alto; protected only by service + identity controls (Section 4) |
+| B | Dashed red | Bypasses Palo Alto; protected only by service + identity controls (Section 5) |
 
 ---
 
-## 3. Traffic Flow Details
+## 3. East-West Traffic (Internal)
+
+### Summary
+
+| Traffic | Goes through PA? | What filters it | Status |
+|---------|------------------|-----------------|--------|
+| Spoke A ↔ Spoke B | ✅ Yes, via hub | PA, then destination NSG (if any) | Confirmed by network team |
+| Spoke ↔ Hub | ⚠️ Depends on hub subnet | NSGs; see hub bypass exception below | Known exception |
+| Subnet ↔ subnet (same VNet) | ❌ No | NSGs only | Azure platform behavior |
+| Unpeered VNet ↔ any VNet | N/A: no path | Isolated | Confirmed by network team |
+
+### Diagram C: Spoke-to-spoke (inspected) ✅
+
+```mermaid
+flowchart LR
+    subgraph SA["Spoke A VNet (Subscription A)"]
+        A1["Resource in Spoke A"]
+    end
+
+    subgraph HUB["Hub VNet"]
+        PA["Palo Alto Firewall"]
+    end
+
+    subgraph SB["Spoke B VNet (Subscription B)"]
+        NSGB["NSG (if any)"]
+        B1["Resource in Spoke B"]
+    end
+
+    subgraph ISO["Unpeered VNet"]
+        X1["Isolated: no peering,<br/>no path to other VNets"]
+    end
+
+    A1 -->|"① Spoke A to Hub (peering)"| PA
+    PA -->|"② Allowed traffic only"| NSGB
+    NSGB -->|"③ If NSG allows"| B1
+
+    classDef fw fill:#fff4d6,stroke:#e0a100,stroke-width:2px,color:#000
+    classDef ctrl fill:#e3f2fd,stroke:#1565c0,stroke-width:1px,color:#000
+    classDef wl fill:#e8f5e9,stroke:#2e7d32,stroke-width:1px,color:#000
+    classDef iso fill:#eeeeee,stroke:#757575,stroke-width:1px,stroke-dasharray:5 5,color:#000
+    class PA fw
+    class NSGB ctrl
+    class A1,B1 wl
+    class X1 iso
+    linkStyle default stroke:#2e7d32,stroke-width:2px
+```
+
+### Diagram D: Subnet-to-subnet in the same VNet (NOT inspected) ⚠️
+
+```mermaid
+flowchart LR
+    subgraph SPOKE["Spoke VNet (single VNet)"]
+        subgraph S1["Subnet 1"]
+            R1["Resource"]
+        end
+        subgraph S2["Subnet 2"]
+            NSG2["NSG (if any)"]
+            R2["Resource / Private Endpoint"]
+        end
+    end
+
+    R1 -.->|"Direct VnetLocal route<br/>NO Palo Alto"| NSG2
+    NSG2 -.->|"NSG is the ONLY control"| R2
+
+    classDef ctrl fill:#e3f2fd,stroke:#1565c0,stroke-width:1px,color:#000
+    classDef bypass fill:#ffe5e5,stroke:#d33,stroke-width:2px,color:#000
+    class NSG2 ctrl
+    class R1,R2 bypass
+    linkStyle default stroke:#d33,stroke-width:2px
+```
+
+### Why subnet-to-subnet skips PA
+
+Azure routes traffic inside a VNet with the `VnetLocal` system route, so it goes straight from subnet to subnet. PA only sees traffic that a route table sends to it.
+
+| Subnet state | Result for traffic from other subnets in the same VNet |
+|--------------|---------------------------------------------------------|
+| No NSG on subnet or NIC | **All ports open** |
+| NSG with only default rules | **Still all open.** `AllowVnetInBound` (priority 65000) allows all `VirtualNetwork` traffic |
+| NSG with explicit allows + deny `VirtualNetwork` above 65000 | Properly segmented |
+
+**Private endpoint catch:** NSG rules only apply to private endpoints when `privateEndpointNetworkPolicies` is **Enabled** on the subnet.
+
+### Known exception: hub firewall-bypass subnet
+
+The hub has an intentional firewall-bypass subnet for **storage private endpoints used for large data copies**. The Azure PA charges per packet inspected, so this traffic is routed around it for cost reasons.
+
+| Implication | Control to rely on |
+|-------------|--------------------|
+| Traffic to these private endpoints is not inspected by PA | NSGs on the bypass subnet (with PE network policies enabled) |
+| Reachable from peered spokes over the hub peering | Storage RBAC, shared key disabled, storage logs |
+
+### Unpeered VNets: isolated, but not protected
+
+| Aspect | Result |
+|--------|--------|
+| East-west | ✅ Isolated. No path to the hub or other VNets |
+| Internet exposure | ⚠️ Outside the hub, so **not behind PA**. A public IP or NAT here would be internet-facing with only NSGs in front |
+
+---
+
+## 4. Traffic Flow Details
 
 ### Inspected path (IaaS)
 ```
@@ -173,7 +287,7 @@ These services live outside customer VNets/VPCs, so there is no path to force th
 
 ---
 
-## 4. Security Implications (PaaS Exception)
+## 5. Security Implications (PaaS Exception)
 
 Because PA can't protect PaaS public endpoints, controls must live at the **service** and **identity** layer:
 
@@ -187,11 +301,14 @@ Because PA can't protect PaaS public endpoints, controls must live at the **serv
 
 ---
 
-## 5. Open Questions for Network Team
+## 6. Open Questions for Network Team
 
 | # | Question |
 |---|----------|
 | 1 | Q3 answer explicitly covered EC2 and LB public IPs. Confirm the same guarantee for **Azure VM public IPs**. |
 | 2 | How is on-prem ↔ cloud traffic routed (ExpressRoute / VPN)? Does it pass through both on-prem and cloud PAs? |
 | 3 | Is **egress** (cloud → internet) also forced through PA (e.g., UDR 0.0.0.0/0 to PA in Azure)? |
-| 4 | Is east-west traffic (spoke ↔ spoke, VPC ↔ VPC) inspected by PA? |
+| 4 | ~~Is east-west traffic (spoke ↔ spoke) inspected by PA?~~ ✅ Answered: yes, via the hub (Q5). |
+| 5 | Is VPC ↔ VPC traffic in AWS inspected by PA (Transit Gateway to inspection VPC, or direct peering)? |
+| 6 | Are unpeered VNets allowed to have public IPs or NAT gateways? If so, they're internet-facing without PA. |
+| 7 | Are any spokes directly peered to each other (bypassing the hub)? |
